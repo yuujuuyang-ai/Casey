@@ -479,6 +479,7 @@ const S = {
   showStats: false,
   longAbsent: null,
   counterEditor: null,
+  exportSheet: null,
   calMonth: null,
   _searchFocused: false,
 };
@@ -1052,56 +1053,62 @@ function fallbackDownload(blob, filename){
   }, 300);
 }
 
-function exportAsCSV(dateKey, dateLabel, todayAttendance, todayMeals, counts, absentNames, expectedNames){
-  const rows = [];
-  rows.push(["서구케어재가노인주간보호센터"]);
-  rows.push(["날짜", dateLabel]);
-  rows.push([]);
-  rows.push(["구분", "인원수"]);
-  rows.push(["전체 인원", S.residents.length]);
-  rows.push(["출석", counts.present]);
-  rows.push(["결석", counts.absent]);
-  rows.push(["등원예정", counts.expected]);
-  rows.push([]);
-  FLOORS.forEach(f => rows.push([f + " 조식", todayMeals[f] || 0]));
+function xlsCell(value, cls = ""){
+  return `<td class="${cls}">${esc(value === undefined || value === null ? "" : value)}</td>`;
+}
+
+function xlsHeader(cells){
+  return `<tr>${cells.map(v => `<th>${esc(v)}</th>`).join("")}</tr>`;
+}
+
+function buildExportRows(dateKey, dateLabel, todayAttendance, todayMeals, counts, absentNames, expectedNames){
   const todayStaff = S.staff[dateKey] || {};
-  FLOORS.forEach(f => rows.push([f + " 직원", todayStaff[f] || 0]));
-  rows.push([]);
   const reasons = S.absentReasons[dateKey] || {};
   const expReasons = S.expectedReasons[dateKey] || {};
-  rows.push(["결석자", absentNames.length ? absentNames.join(", ") : "없음"]);
-  rows.push(["등원예정자", expectedNames.length ? expectedNames.join(", ") : "없음"]);
-  const dayNote = (S.notes[dateKey] || "").trim();
-  if (dayNote) { rows.push([]); rows.push(["오늘의 메모", dayNote]); }
-  rows.push([]);
   const presentTimes = S.attendanceTimes[dateKey] || {};
-  rows.push(["이름", "층", "상태", "사유", "출석체크시간", "개인메모"]);
-  S.residents.forEach(r => {
+  const dayNote = (S.notes[dateKey] || "").trim();
+  const rows = [];
+
+  rows.push(["서구케어재가노인주간보호센터 출석현황"]);
+  rows.push(["날짜", dateLabel, "전체", `${S.residents.length}명`]);
+  rows.push([]);
+  rows.push(["전체 요약"]);
+  rows.push(["전체", "출석", "결석", "등원예정", "미체크", "결석자", "등원예정자", "오늘의 메모"]);
+  rows.push([
+    S.residents.length,
+    counts.present,
+    counts.absent,
+    counts.expected,
+    counts.unchecked,
+    absentNames.length ? absentNames.join(", ") : "없음",
+    expectedNames.length ? expectedNames.join(", ") : "없음",
+    dayNote,
+  ]);
+  rows.push([]);
+  rows.push(["층별 현황"]);
+  rows.push(["층", "전체", "출석", "결석", "등원예정", "미체크", "조식", "직원"]);
+  FLOORS.forEach(floor => {
+    const c = computeFloorCounts(floor);
+    rows.push([floor, c.total, c.present, c.absent, c.expected, c.unchecked, todayMeals[floor] || 0, todayStaff[floor] || 0]);
+  });
+  rows.push([]);
+  rows.push(["어르신별 상세 명단"]);
+  rows.push(["번호", "층", "이름", "상태", "출석체크시간", "사유", "개인메모"]);
+  sortByName(S.residents).forEach((r, idx) => {
     const saved = todayAttendance[r.id];
     const st = saved || (isAutoExpectedDay(r, dateKey) ? "expected" : undefined);
     const reasonCell = saved === "absent" ? (reasons[r.id] || "")
-                     : saved === "expected" ? (expReasons[r.id] || "") : "";
+                     : saved === "expected" ? (expReasons[r.id] || "")
+                     : (!saved && st === "expected") ? (r.autoExpectedReason || "자동 등원예정") : "";
     const presentTime = st === "present" ? (presentTimes[r.id] || "") : "";
-    rows.push([
-      r.name,
-      r.floor,
-      st ? STATUS[st].label : "미체크",
-      reasonCell,
-      presentTime,
-      residentMemo(r),
-    ]);
+    rows.push([idx + 1, r.floor, r.name, st ? STATUS[st].label : "미체크", presentTime, reasonCell, residentMemo(r)]);
   });
 
-  const csv = rows.map(row =>
-    row.map(cell => {
-      const s = String(cell === undefined || cell === null ? "" : cell);
-      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-    }).join(",")
-  ).join("\r\n");
+  return rows;
+}
 
-  // BOM 추가해서 엑셀에서 한글 안 깨지게
-  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-  downloadBlob(blob, `출석현황_${dateKey}.csv`);
+function rowsToTSV(rows){
+  return rows.map(row => row.map(cell => String(cell === undefined || cell === null ? "" : cell).replace(/\t/g, " ").replace(/\r?\n/g, " ")).join("\t")).join("\n");
 }
 
 function exportToExcel(){
@@ -1126,11 +1133,39 @@ function exportToExcel(){
       return rs ? `${r.name}(${rs})` : r.name;
     });
 
-    exportAsCSV(dateKey, dateLabel, todayAttendance, todayMeals, counts, absentNames, expectedNames);
+    const rows = buildExportRows(dateKey, dateLabel, todayAttendance, todayMeals, counts, absentNames, expectedNames);
+    S.exportSheet = { dateLabel, rows, copied: false };
+    render();
   } catch (e) {
     console.error(e);
     alert("내보내기에 실패했어요: " + (e && e.message ? e.message : e));
   }
+}
+
+function closeExportSheet(){ S.exportSheet = null; render(); }
+
+function copyExportSheet(){
+  if (!S.exportSheet) return;
+  const text = rowsToTSV(S.exportSheet.rows);
+  const done = () => { S.exportSheet.copied = true; render(); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => copyExportSheetFallback(text, done));
+  } else {
+    copyExportSheetFallback(text, done);
+  }
+}
+
+function copyExportSheetFallback(text, done){
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  document.execCommand("copy");
+  document.body.removeChild(ta);
+  done();
 }
 
 /* ---------- Render helpers ---------- */
@@ -1155,7 +1190,7 @@ function renderReasonBox(id, kind){
   const isPreset = reasonList.includes(current);
   const customVal = isPreset ? "" : current;
   return `
-    <div style="background:${theme.boxBg};border:1.5px solid ${theme.boxBorder};border-top:none;border-radius:0 0 12px 12px;padding:9px 12px;margin-top:-2px;">
+    <div style="background:${theme.boxBg};border:1.5px solid ${theme.boxBorder};border-radius:12px;padding:9px 12px;margin-top:8px;">
       <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;">
         <span style="font-size:11px;font-weight:800;color:${theme.label};margin-right:2px;">사유</span>
         ${chips}
@@ -1296,9 +1331,10 @@ function renderFloorTab(floor){
       ` : "";
       const reasonBox = saved === "absent" ? renderReasonBox(r.id, "absent")
                       : saved === "expected" ? renderReasonBox(r.id, "expected") : "";
+      const joinedStyle = "";
       return `
         <div style="margin-bottom:6px;">
-          <div class="resident-row" style="border-color:${borderColor};background:${bg};${isCustom && !scheduledToday ? "opacity:0.6;" : ""}margin-bottom:0;">
+          <div class="resident-row" style="border-color:${borderColor};background:${bg};${isCustom && !scheduledToday ? "opacity:0.6;" : ""}${joinedStyle}margin-bottom:0;">
             <div style="flex-shrink:0;min-width:52px;">
               <div class="resident-name" style="margin:0;">${esc(r.name)}${renderMemoBadge(r)}</div>
               ${scheduleBadge}
@@ -1633,7 +1669,7 @@ function renderSlides(){
       </div>
       <button class="slide-nav-btn" ${S.page===2?"disabled":""} onclick="gotoPage(${S.page+1})">다음 ›</button>
     </div>
-    <button class="export-btn" onclick="exportToExcel()"><span>⬇️</span><span>파일로 내보내기 (엑셀)</span></button>
+    <button class="export-btn" onclick="exportToExcel()"><span>📋</span><span>엑셀용 표 만들기</span></button>
   `;
 }
 
@@ -1679,9 +1715,11 @@ function renderSearchResults(){
         </button>
       `;
     }).join("");
+    const reasonBox = saved === "absent" ? renderReasonBox(r.id, "absent") : saved === "expected" ? renderReasonBox(r.id, "expected") : "";
+    const joinedStyle = "";
     return `
       <div style="margin-bottom:6px;">
-        <div class="resident-row" style="border-color:${borderColor};background:${bg};margin-bottom:0;">
+        <div class="resident-row" style="border-color:${borderColor};background:${bg};${joinedStyle}margin-bottom:0;">
           <div style="flex-shrink:0;min-width:64px;">
             <div class="resident-name" style="margin:0;">${esc(r.name)}${renderMemoBadge(r)}</div>
             <div style="font-size:10px;font-weight:700;color:#8A95A3;margin-top:1px;">${r.floor}${r.night ? " · 야간" : ""}</div>
@@ -1689,7 +1727,7 @@ function renderSearchResults(){
           </div>
           <div class="status-group">${btns}</div>
         </div>
-        ${saved === "absent" ? renderReasonBox(r.id, "absent") : saved === "expected" ? renderReasonBox(r.id, "expected") : ""}
+        ${reasonBox}
       </div>
     `;
   }).join("");
@@ -1995,6 +2033,41 @@ function renderCounterEditor(){
   `;
 }
 
+function renderExportSheet(){
+  if (!S.exportSheet) return "";
+  const rows = S.exportSheet.rows || [];
+  const previewRows = rows.map(row => {
+    const isTitle = row.length === 1 && row[0];
+    const isBlank = row.every(cell => !cell);
+    if (isBlank) return `<tr><td colspan="8" style="height:8px;background:#F7F9FC;border:none;"></td></tr>`;
+    if (isTitle) return `<tr><td colspan="8" style="background:#EEF4FA;color:#2F5F8F;font-weight:900;">${esc(row[0])}</td></tr>`;
+    return `<tr>${row.map(cell => `<td>${esc(cell)}</td>`).join("")}</tr>`;
+  }).join("");
+  return `
+    <div onclick="closeExportSheet()" style="position:fixed;inset:0;background:rgba(15,23,42,0.42);z-index:190;display:flex;align-items:flex-end;justify-content:center;">
+      <div onclick="event.stopPropagation()" style="background:#F7F9FC;width:100%;max-width:760px;max-height:86vh;border-radius:20px 20px 0 0;padding:18px;box-shadow:0 -12px 34px rgba(15,23,42,0.18);display:flex;flex-direction:column;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
+          <div>
+            <div style="font-size:18px;font-weight:900;color:#1F2937;">엑셀용 표</div>
+            <div style="font-size:12px;font-weight:700;color:#8A95A3;margin-top:2px;">복사 후 엑셀이나 Numbers에 붙여넣으면 돼요</div>
+          </div>
+          <button onclick="closeExportSheet()" style="border:none;background:#E8EEF6;border-radius:50%;width:32px;height:32px;font-size:16px;color:#374151;">✕</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;">
+          <button onclick="copyExportSheet()" style="flex:1;padding:13px;border-radius:12px;border:none;background:#2F5F8F;color:#fff;font-size:15px;font-weight:900;">${S.exportSheet.copied ? "복사됨 ✓" : "표 복사하기"}</button>
+          <button onclick="closeExportSheet()" style="padding:13px 16px;border-radius:12px;border:2px solid #D0D7E2;background:#fff;color:#475569;font-size:15px;font-weight:800;">닫기</button>
+        </div>
+        <div style="overflow:auto;background:#fff;border:1.5px solid #D9E2EC;border-radius:12px;">
+          <table style="border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap;">
+            ${previewRows}
+          </table>
+        </div>
+        <div style="font-size:11px;color:#8A95A3;text-align:center;margin-top:9px;">PASS 인증 없이 복사해서 붙여넣는 방식이에요</div>
+      </div>
+    </div>
+  `;
+}
+
 function render(){
   const app = document.getElementById("app");
   if (!S.loaded) {
@@ -2021,7 +2094,7 @@ function render(){
 
   const banner = (!isToday && S.tab !== "roster") ? `<div class="date-banner">${formatDateLabel(S.selectedDate)} 기록을 보고 있어요</div>` : "";
 
-  app.innerHTML = renderHeader() + renderTabs() + `<div class="content">${banner}${body}</div>` + renderStatusModal() + renderResetConfirm() + renderCalendar() + renderStats() + renderLongAbsent() + renderCounterEditor();
+  app.innerHTML = renderHeader() + renderTabs() + `<div class="content">${banner}${body}</div>` + renderStatusModal() + renderResetConfirm() + renderCalendar() + renderStats() + renderLongAbsent() + renderCounterEditor() + renderExportSheet();
 
   const nameInput = document.getElementById("newNameInput");
   if (nameInput && !S._searchFocused) {
