@@ -78,7 +78,8 @@
   }
   .tab-btn.active { background: #2F5F8F; color: #F7F9FC; }
   .tab-icon { font-size: 15px; line-height: 1; }
-  .tab-btn.no-label .tab-icon { font-size: 17px; font-weight: 900; }
+  .tab-btn.no-label { padding: 6px 2px; min-height: 65px; }
+  .tab-btn.no-label .tab-icon { font-size: 40px; font-weight: 900; }
 
   .content { padding: 16px; }
 
@@ -494,6 +495,15 @@ function showSaveState(state){
   if (state === "saving") { el.textContent = "저장 중..."; el.classList.add("show"); }
   else if (state === "saved") { el.textContent = "저장됨 ✓"; el.classList.add("show"); clearTimeout(saveTimer); saveTimer = setTimeout(()=>el.classList.remove("show"), 1200); }
   else if (state === "error") { el.textContent = "저장 실패 (다시 시도해주세요)"; el.classList.add("error","show"); clearTimeout(saveTimer); saveTimer = setTimeout(()=>el.classList.remove("show"), 2500); }
+}
+
+function showQuickNotice(message, isError = false){
+  const el = document.getElementById("saveIndicator");
+  el.classList.toggle("error", isError);
+  el.textContent = message;
+  el.classList.add("show");
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(()=>el.classList.remove("show"), isError ? 2600 : 1500);
 }
 
 function persist(key, value){
@@ -1023,35 +1033,18 @@ function computeFloorCounts(floor){
 }
 
 function downloadBlob(blob, filename){
-  // iOS 홈화면 앱 모드에서는 공유 시트를 통해 저장 (파일 앱, 메일 등으로 보낼 수 있음)
-  try {
-    if (navigator.canShare && window.File) {
-      const file = new File([blob], filename, { type: blob.type });
-      if (navigator.canShare({ files: [file] })) {
-        navigator.share({ files: [file], title: filename }).catch(() => fallbackDownload(blob, filename));
-        return;
-      }
-    }
-  } catch (e) { /* 무시하고 아래 방식으로 */ }
   fallbackDownload(blob, filename);
 }
 
 function fallbackDownload(blob, filename){
   const url = URL.createObjectURL(blob);
-  // 새 탭으로 열기 (iOS Safari에서 다운로드 대신 표시되면 사용자가 공유버튼으로 저장 가능)
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
-  a.target = "_blank";
-  a.rel = "noopener";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => {
-    // 클릭이 안 먹은 경우 대비: 새 창으로 직접 열기
-    try { window.open(url, "_blank"); } catch(e) {}
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-  }, 300);
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 function xlsCell(value, cls = ""){
@@ -1112,6 +1105,46 @@ function rowsToTSV(rows){
   return rows.map(row => row.map(cell => String(cell === undefined || cell === null ? "" : cell).replace(/\t/g, " ").replace(/\r?\n/g, " ")).join("\t")).join("\n");
 }
 
+function buildExcelHtml(rows, dateLabel){
+  const maxCols = Math.max(8, ...rows.map(row => row.length));
+  const bodyRows = rows.map(row => {
+    const isBlank = row.every(cell => !cell);
+    const isTitle = row.length === 1 && row[0];
+    if (isBlank) return `<tr><td colspan="${maxCols}" class="blank"></td></tr>`;
+    if (isTitle) return `<tr><th colspan="${maxCols}" class="section">${esc(row[0])}</th></tr>`;
+    const cells = row.map(cell => `<td>${esc(cell === undefined || cell === null ? "" : cell)}</td>`).join("");
+    const fill = row.length < maxCols ? `<td colspan="${maxCols - row.length}"></td>` : "";
+    return `<tr>${cells}${fill}</tr>`;
+  }).join("");
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body { font-family: 'Malgun Gothic', sans-serif; }
+  table { border-collapse: collapse; font-size: 12pt; }
+  th, td { border: 1px solid #9CA3AF; padding: 6px 8px; mso-number-format: "\\@"; }
+  th.section { background: #DCEBFA; color: #173F6B; font-weight: 800; text-align: left; font-size: 14pt; }
+  .blank { border: none; height: 12px; }
+</style>
+</head>
+<body>
+<table>
+  <tr><th colspan="${maxCols}" class="section">${esc(dateLabel)} 출석현황</th></tr>
+  ${bodyRows}
+</table>
+</body>
+</html>`;
+}
+
+function downloadExportFile(rows, dateKey, dateLabel){
+  const html = "\ufeff" + buildExcelHtml(rows, dateLabel);
+  const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
+  downloadBlob(blob, `출석현황_${dateKey}.xls`);
+  showQuickNotice("엑셀 파일 저장됨 ✓");
+}
+
 function exportToExcel(){
   try {
     const dateKey = S.selectedDate;
@@ -1135,8 +1168,7 @@ function exportToExcel(){
     });
 
     const rows = buildExportRows(dateKey, dateLabel, todayAttendance, todayMeals, counts, absentNames, expectedNames);
-    S.exportSheet = { dateLabel, rows, copied: false };
-    render();
+    downloadExportFile(rows, dateKey, dateLabel);
   } catch (e) {
     console.error(e);
     alert("내보내기에 실패했어요: " + (e && e.message ? e.message : e));
@@ -1145,18 +1177,31 @@ function exportToExcel(){
 
 function closeExportSheet(){ S.exportSheet = null; render(); }
 
-function copyExportSheet(){
-  if (!S.exportSheet) return;
-  const text = rowsToTSV(S.exportSheet.rows);
-  const done = () => { S.exportSheet.copied = true; render(); };
+function copyRowsToClipboard(rows, dateLabel){
+  const text = rowsToTSV(rows);
+  const done = () => {
+    S.exportSheet = null;
+    render();
+    showQuickNotice("엑셀 표 복사됨 ✓");
+  };
+  const fail = () => {
+    S.exportSheet = { dateLabel, rows, copied: false };
+    render();
+    showQuickNotice("자동 복사가 막혀서 표를 열었어요", true);
+  };
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(done).catch(() => copyExportSheetFallback(text, done));
+    navigator.clipboard.writeText(text).then(done).catch(() => copyTextFallback(text, done, fail));
   } else {
-    copyExportSheetFallback(text, done);
+    copyTextFallback(text, done, fail);
   }
 }
 
-function copyExportSheetFallback(text, done){
+function copyExportSheet(){
+  if (!S.exportSheet) return;
+  copyRowsToClipboard(S.exportSheet.rows, S.exportSheet.dateLabel);
+}
+
+function copyTextFallback(text, done, fail){
   const ta = document.createElement("textarea");
   ta.value = text;
   ta.style.position = "fixed";
@@ -1164,9 +1209,11 @@ function copyExportSheetFallback(text, done){
   document.body.appendChild(ta);
   ta.focus();
   ta.select();
-  document.execCommand("copy");
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch(e) { ok = false; }
   document.body.removeChild(ta);
-  done();
+  if (ok) done();
+  else fail();
 }
 
 /* ---------- Render helpers ---------- */
@@ -1670,7 +1717,7 @@ function renderSlides(){
       </div>
       <button class="slide-nav-btn" ${S.page===2?"disabled":""} onclick="gotoPage(${S.page+1})">다음 ›</button>
     </div>
-    <button class="export-btn" onclick="exportToExcel()"><span>📋</span><span>엑셀용 표 만들기</span></button>
+    <button class="export-btn" onclick="exportToExcel()"><span>📥</span><span>엑셀 파일 내보내기</span></button>
   `;
 }
 
@@ -2050,12 +2097,12 @@ function renderExportSheet(){
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
           <div>
             <div style="font-size:18px;font-weight:900;color:#1F2937;">엑셀용 표</div>
-            <div style="font-size:12px;font-weight:700;color:#8A95A3;margin-top:2px;">복사 후 엑셀이나 Numbers에 붙여넣으면 돼요</div>
+            <div style="font-size:12px;font-weight:700;color:#8A95A3;margin-top:2px;">자동 복사가 막혔을 때만 열리는 화면이에요</div>
           </div>
           <button onclick="closeExportSheet()" style="border:none;background:#E8EEF6;border-radius:50%;width:32px;height:32px;font-size:16px;color:#374151;">✕</button>
         </div>
         <div style="display:flex;gap:8px;margin-bottom:10px;">
-          <button onclick="copyExportSheet()" style="flex:1;padding:13px;border-radius:12px;border:none;background:#2F5F8F;color:#fff;font-size:15px;font-weight:900;">${S.exportSheet.copied ? "복사됨 ✓" : "표 복사하기"}</button>
+          <button onclick="copyExportSheet()" style="flex:1;padding:13px;border-radius:12px;border:none;background:#2F5F8F;color:#fff;font-size:15px;font-weight:900;">다시 복사하기</button>
           <button onclick="closeExportSheet()" style="padding:13px 16px;border-radius:12px;border:2px solid #D0D7E2;background:#fff;color:#475569;font-size:15px;font-weight:800;">닫기</button>
         </div>
         <div style="overflow:auto;background:#fff;border:1.5px solid #D9E2EC;border-radius:12px;">
