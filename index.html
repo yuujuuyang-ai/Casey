@@ -78,6 +78,7 @@
   }
   .tab-btn.active { background: #2F5F8F; color: #F7F9FC; }
   .tab-icon { font-size: 15px; line-height: 1; }
+  .tab-btn.no-label .tab-icon { font-size: 17px; font-weight: 900; }
 
   .content { padding: 16px; }
 
@@ -1235,16 +1236,16 @@ function renderHeader(){
 function renderTabs(){
   const tabs = [
     { key: "slides", label: "현황판", icon: "📊" },
-    { key: "floor2", label: "2층", icon: "✓" },
-    { key: "floor3", label: "3층", icon: "✓" },
+    { key: "floor2", label: "", icon: "2F" },
+    { key: "floor3", label: "", icon: "3F" },
     { key: "roster", label: "명단관리", icon: "👥" },
   ];
   return `
     <div class="tabs">
       ${tabs.map(t => `
-        <button class="tab-btn ${S.tab === t.key ? "active" : ""}" onclick="setTab('${t.key}')">
+        <button class="tab-btn ${S.tab === t.key ? "active" : ""}${t.label ? "" : " no-label"}" onclick="setTab('${t.key}')">
           <span class="tab-icon">${t.icon}</span>
-          <span>${t.label}</span>
+          ${t.label ? `<span>${t.label}</span>` : ""}
         </button>
       `).join("")}
     </div>
