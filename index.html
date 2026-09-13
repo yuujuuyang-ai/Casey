@@ -484,10 +484,12 @@ const S = {
   exportSheet: null,
   calMonth: null,
   _searchFocused: false,
+  _searchComposing: false,
 };
 
 let saveTimer = null;
 let debounceTimers = {};
+let searchRenderTimer = null;
 
 function showSaveState(state){
   const el = document.getElementById("saveIndicator");
@@ -569,7 +571,7 @@ function saveStaff(){ debouncedPersist("staff", S.staff); }
 function saveNotes(){ debouncedPersist("notes", S.notes); }
 
 /* ---------- Actions ---------- */
-function setTab(tab){ S.tab = tab; if (tab !== "slides") S.page = 0; S.search = ""; S._searchFocused = false; render(); }
+function setTab(tab){ S.tab = tab; if (tab !== "slides") S.page = 0; S.search = ""; S._searchFocused = false; S._searchComposing = false; render(); }
 function setSelectedDate(key){ S.selectedDate = key; render(); }
 function shiftDate(delta){ S.selectedDate = shiftDateKey(S.selectedDate, delta); render(); }
 function goToday(){ S.selectedDate = todayKey(); render(); }
@@ -947,7 +949,7 @@ function resyncRoster(){
 function updateSearch(v){
   S.search = v;
   if (S.tab === "roster") {
-    render();
+    applyRosterSearchFilter();
     return;
   }
   const searchable = (S.tab === "slides" || S.tab === "floor2" || S.tab === "floor3");
@@ -955,6 +957,8 @@ function updateSearch(v){
   // 검색 결과 영역만 갱신 (전체 render를 안 해서 한글 조합이 깨지지 않음)
   if (searchable && container) {
     container.innerHTML = v.trim() ? renderSearchResults() : "";
+    const clearBtn = document.getElementById("searchClearBtn");
+    if (clearBtn) clearBtn.style.display = v.trim() ? "inline-flex" : "none";
     // 검색어가 있을 땐 아래 원래 콘텐츠(층 목록 등)를 숨김
     let sib = container.nextElementSibling;
     while (sib) { sib.style.display = v.trim() ? "none" : ""; sib = sib.nextElementSibling; }
@@ -962,7 +966,36 @@ function updateSearch(v){
   }
   render();
 }
-function clearSearch(){ S.search = ""; S._searchFocused = false; render(); }
+function applyRosterSearchFilter(){
+  const q = S.search.trim();
+  const rows = document.querySelectorAll("[data-roster-name]");
+  let count = 0;
+  rows.forEach(row => {
+    const name = row.getAttribute("data-roster-name") || "";
+    const matched = !q || name.includes(q);
+    row.style.display = matched ? "" : "none";
+    if (matched) count++;
+  });
+  const status = document.getElementById("rosterSearchStatus");
+  if (status) {
+    status.style.display = q ? "" : "none";
+    status.textContent = q ? `검색결과 ${count}명` : "";
+  }
+  const empty = document.getElementById("rosterNoResults");
+  if (empty) {
+    empty.style.display = (q && count === 0) ? "" : "none";
+    empty.textContent = `"${q}" 검색 결과가 없어요`;
+  }
+  const clearBtn = document.getElementById("searchClearBtn");
+  if (clearBtn) clearBtn.style.display = q ? "inline-flex" : "none";
+}
+function clearSearch(){
+  S.search = "";
+  S._searchFocused = false;
+  S._searchComposing = false;
+  if (searchRenderTimer) clearTimeout(searchRenderTimer);
+  render();
+}
 function openStatusList(status, floor){ S.statusModal = status; S.statusModalFloor = floor || null; render(); }
 function closeStatusList(){ S.statusModal = null; S.statusModalFloor = null; render(); }
 function resetDay(){
@@ -1087,15 +1120,20 @@ function buildExportRows(dateKey, dateLabel, todayAttendance, todayMeals, counts
   });
   rows.push([]);
   rows.push(["어르신별 상세 명단"]);
-  rows.push(["번호", "층", "이름", "상태", "출석체크시간", "사유", "개인메모"]);
-  sortByName(S.residents).forEach((r, idx) => {
-    const saved = todayAttendance[r.id];
-    const st = saved || (isAutoExpectedDay(r, dateKey) ? "expected" : undefined);
-    const reasonCell = saved === "absent" ? (reasons[r.id] || "")
-                     : saved === "expected" ? (expReasons[r.id] || "")
-                     : (!saved && st === "expected") ? (r.autoExpectedReason || "자동 등원예정") : "";
-    const presentTime = st === "present" ? (presentTimes[r.id] || "") : "";
-    rows.push([idx + 1, r.floor, r.name, st ? STATUS[st].label : "미체크", presentTime, reasonCell, residentMemo(r)]);
+  let detailNo = 1;
+  FLOORS.forEach(floor => {
+    rows.push([`${floor} 어르신 명단`]);
+    rows.push(["번호", "층", "이름", "상태", "출석체크시간", "사유", "개인메모"]);
+    sortByName(S.residents.filter(r => r.floor === floor)).forEach(r => {
+      const saved = todayAttendance[r.id];
+      const st = saved || (isAutoExpectedDay(r, dateKey) ? "expected" : undefined);
+      const reasonCell = saved === "absent" ? (reasons[r.id] || "")
+                       : saved === "expected" ? (expReasons[r.id] || "")
+                       : (!saved && st === "expected") ? (r.autoExpectedReason || "자동 등원예정") : "";
+      const presentTime = st === "present" ? (presentTimes[r.id] || "") : "";
+      rows.push([detailNo++, r.floor, r.name, st ? STATUS[st].label : "미체크", presentTime, reasonCell, residentMemo(r)]);
+    });
+    rows.push([]);
   });
 
   return rows;
@@ -1107,14 +1145,20 @@ function rowsToTSV(rows){
 
 function buildExcelHtml(rows, dateLabel){
   const maxCols = Math.max(8, ...rows.map(row => row.length));
+  const displayCols = maxCols * 2 - 1;
+  const colGroup = Array.from({ length: displayCols }, (_, idx) =>
+    idx % 2 === 1 ? `<col style="width:14px;">` : `<col style="width:110px;">`
+  ).join("");
+  const spacedCells = row => Array.from({ length: maxCols }, (_, idx) => {
+    const cell = `<td>${esc(row[idx] === undefined || row[idx] === null ? "" : row[idx])}</td>`;
+    return idx < maxCols - 1 ? `${cell}<td class="spacer"></td>` : cell;
+  }).join("");
   const bodyRows = rows.map(row => {
     const isBlank = row.every(cell => !cell);
     const isTitle = row.length === 1 && row[0];
-    if (isBlank) return `<tr><td colspan="${maxCols}" class="blank"></td></tr>`;
-    if (isTitle) return `<tr><th colspan="${maxCols}" class="section">${esc(row[0])}</th></tr>`;
-    const cells = row.map(cell => `<td>${esc(cell === undefined || cell === null ? "" : cell)}</td>`).join("");
-    const fill = row.length < maxCols ? `<td colspan="${maxCols - row.length}"></td>` : "";
-    return `<tr>${cells}${fill}</tr>`;
+    if (isBlank) return `<tr><td colspan="${displayCols}" class="blank"></td></tr>`;
+    if (isTitle) return `<tr><th colspan="${displayCols}" class="section">${esc(row[0])}</th></tr>`;
+    return `<tr>${spacedCells(row)}</tr>`;
   }).join("");
   return `
 <!DOCTYPE html>
@@ -1125,13 +1169,15 @@ function buildExcelHtml(rows, dateLabel){
   body { font-family: 'Malgun Gothic', sans-serif; }
   table { border-collapse: collapse; font-size: 12pt; }
   th, td { border: 1px solid #9CA3AF; padding: 6px 8px; mso-number-format: "\\@"; }
+  td.spacer { border: none; background: #FFFFFF; padding: 0; width: 14px; min-width: 14px; }
   th.section { background: #DCEBFA; color: #173F6B; font-weight: 800; text-align: left; font-size: 14pt; }
   .blank { border: none; height: 12px; }
 </style>
 </head>
 <body>
 <table>
-  <tr><th colspan="${maxCols}" class="section">${esc(dateLabel)} 출석현황</th></tr>
+  <colgroup>${colGroup}</colgroup>
+  <tr><th colspan="${displayCols}" class="section">${esc(dateLabel)} 출석현황</th></tr>
   ${bodyRows}
 </table>
 </body>
@@ -1492,13 +1538,12 @@ function renderRosterTab(){
     </div>
   ` : "";
 
-  const sortedResidents = S.residents.filter(r => !q || r.name.includes(q)).sort((a, b) => {
+  const sortedResidents = [...S.residents].sort((a, b) => {
     if (a.floor !== b.floor) return a.floor.localeCompare(b.floor, "ko");
     return a.name.localeCompare(b.name, "ko");
   });
-  const items = sortedResidents.length === 0 ? `
-    <div class="floor-empty">"${esc(q)}" 검색 결과가 없어요</div>
-  ` : sortedResidents.map(r => {
+  const rosterSearchCount = sortedResidents.filter(r => !q || r.name.includes(q)).length;
+  const items = sortedResidents.map(r => {
     const schedule = r.schedule || [];
     const isDaily = schedule.length === 0;
     const autoExp = r.autoExpected || [];
@@ -1515,7 +1560,7 @@ function renderRosterTab(){
       `;
     }).join("");
     return `
-      <div class="roster-item" style="flex-direction:column;align-items:stretch;">
+      <div class="roster-item" data-roster-name="${esc(r.name)}" style="flex-direction:column;align-items:stretch;${(!q || r.name.includes(q)) ? "" : "display:none;"}">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
           <div>
             <div class="name">${esc(r.name)}${r.night ? ` <span style="font-size:12px;font-weight:800;color:#5B4B7A;background:#F4ECF7;padding:2px 8px;border-radius:8px;">야간</span>` : ""}</div>
@@ -1563,13 +1608,13 @@ function renderRosterTab(){
         </div>
       </div>
     `;
-  }).join("");
+  }).join("") + `<div id="rosterNoResults" class="floor-empty" style="${q && rosterSearchCount === 0 ? "" : "display:none;"}">"${esc(q)}" 검색 결과가 없어요</div>`;
 
   return `
     <div style="background:#F1F5F9;border:1px solid #D9E2EC;border-radius:12px;padding:12px 14px;margin-bottom:12px;">
       <div style="font-size:13px;font-weight:800;color:#2F5F8F;margin-bottom:4px;">${ROSTER_VERSION_LABEL}</div>
       <div style="font-size:16px;font-weight:800;color:#1F2937;">전체 ${S.residents.length}명 <span style="font-size:13px;color:#8A95A3;">2층 ${f2Count}명 · 3층 ${f3Count}명</span></div>
-      ${q ? `<div style="font-size:12px;font-weight:800;color:#475569;margin-top:6px;">검색결과 ${sortedResidents.length}명</div>` : ""}
+      <div id="rosterSearchStatus" style="font-size:12px;font-weight:800;color:#475569;margin-top:6px;${q ? "" : "display:none;"}">${q ? `검색결과 ${rosterSearchCount}명` : ""}</div>
     </div>
     ${renderSearchBar()}
     <button class="roster-add-btn" onclick="toggleAddForm()"><span>➕</span><span>어르신 등록</span></button>
@@ -1727,11 +1772,13 @@ function renderSearchBar(){
     <div style="display:flex;align-items:center;gap:8px;background:#fff;border:2px solid #D9E2EC;border-radius:12px;padding:8px 12px;margin-bottom:14px;">
       <span style="font-size:15px;">🔍</span>
       <input id="searchInput" placeholder="이름 검색" value="${esc(S.search)}"
-        oninput="updateSearch(this.value)"
+        oncompositionstart="S._searchComposing=true"
+        oncompositionend="S._searchComposing=false; updateSearch(this.value)"
+        oninput="if(!S._searchComposing) updateSearch(this.value)"
         onfocus="S._searchFocused=true"
         onblur="S._searchFocused=false"
         style="flex:1;border:none;outline:none;font-size:15px;background:transparent;color:#1F2937;" />
-      ${S.search ? `<button onclick="clearSearch()" style="border:none;background:#E8EEF6;border-radius:50%;width:22px;height:22px;font-size:13px;color:#8A95A3;">✕</button>` : ""}
+      <button id="searchClearBtn" onclick="clearSearch()" style="display:${S.search ? "inline-flex" : "none"};align-items:center;justify-content:center;border:none;background:#E8EEF6;border-radius:50%;width:22px;height:22px;font-size:13px;color:#8A95A3;">✕</button>
     </div>
   `;
 }
@@ -2154,7 +2201,7 @@ function render(){
   // 검색칸은 사용자가 직접 만지고 있을 때만 포커스를 되돌려줌.
   // (출석 버튼 등을 눌러 다시 그릴 때 커서가 검색칸으로 튀는 문제 방지)
   const searchInput = document.getElementById("searchInput");
-  if (searchInput && S._searchFocused) {
+  if (searchInput && S._searchFocused && !S._searchComposing) {
     const val = searchInput.value;
     searchInput.focus();
     const len = val.length;
